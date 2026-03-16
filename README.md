@@ -1,4 +1,4 @@
-# AI Marketing Campaign Maker
+# BriefToBrand
 
 Production-ready multimodal campaign generation system built for the **Gemini Live Agent Challenge** (Creative Storyteller category).
 

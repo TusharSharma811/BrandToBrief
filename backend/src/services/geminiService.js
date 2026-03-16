@@ -1,6 +1,14 @@
 const { GoogleGenAI } = require("@google/genai");
 const config = require("../config");
 
+class QuotaExceededError extends Error {
+  constructor(message, retryAfterSeconds = null) {
+    super(message);
+    this.name = "QuotaExceededError";
+    this.retryAfterSeconds = retryAfterSeconds;
+  }
+}
+
 class GeminiService {
   constructor() {
     const opts = {};
@@ -20,52 +28,208 @@ class GeminiService {
    * @returns {Promise<Object>}
    */
   async generateCampaignJson(prompt) {
-    const response = await this.client.models.generateContent({
-      model: config.geminiTextModel,
-      contents: prompt,
-      config: {
-        temperature: 0.8,
-        topP: 0.95,
-        responseMimeType: "application/json",
-      },
-    });
+    try {
+      const response = await this.client.models.generateContent({
+        model: config.geminiTextModel,
+        contents: prompt,
+        config: {
+          temperature: 0.8,
+          topP: 0.95,
+          responseMimeType: "application/json",
+        },
+      });
 
-    const text = response.text;
-    if (!text) {
-      throw new Error("Gemini did not return text for campaign JSON.");
+      const text = response.text;
+      if (!text) {
+        throw new Error("Gemini did not return text for campaign JSON.");
+      }
+      return JSON.parse(text);
+    } catch (err) {
+      if (GeminiService.isQuotaExceededError(err)) {
+        const retryAfterSeconds = GeminiService.getRetryAfterSeconds(err);
+        throw new QuotaExceededError(
+          "Gemini quota exceeded. Enable billing or retry later.",
+          retryAfterSeconds
+        );
+      }
+      throw err;
     }
-    return JSON.parse(text);
   }
 
   /**
-   * Generate image bytes from a prompt.
+   * Generate image bytes from the configured image provider.
    * @param {string} prompt
    * @returns {Promise<Buffer>}
    */
   async generateImageBytes(prompt) {
-    const response = await this.client.models.generateContent({
-      model: config.geminiImageModel,
-      contents: prompt,
-      config: {
-        responseModalities: ["IMAGE", "TEXT"],
+    if (config.imageProvider === "huggingface") {
+      return this.generateImageBytesWithHuggingFace(prompt);
+    }
+
+    return this.generateImageBytesWithGemini(prompt);
+  }
+
+  async generateImageBytesWithGemini(prompt) {
+    try {
+      const response = await this.client.models.generateContent({
+        model: config.geminiImageModel,
+        contents: prompt,
+        config: {
+          responseModalities: ["IMAGE", "TEXT"],
+        },
+      });
+
+      if (!response.candidates || response.candidates.length === 0) {
+        throw new Error("No image candidates returned.");
+      }
+
+      for (const part of response.candidates[0].content.parts) {
+        if (part.inlineData && part.inlineData.data) {
+          // Data may already be a Buffer or a base64 string
+          if (Buffer.isBuffer(part.inlineData.data)) {
+            return part.inlineData.data;
+          }
+          return Buffer.from(part.inlineData.data, "base64");
+        }
+      }
+
+      throw new Error("Image bytes were not found in Gemini response.");
+    } catch (err) {
+      if (GeminiService.isQuotaExceededError(err)) {
+        const retryAfterSeconds = GeminiService.getRetryAfterSeconds(err);
+        throw new QuotaExceededError(
+          "Gemini image quota exceeded. Enable billing or retry later.",
+          retryAfterSeconds
+        );
+      }
+      throw err;
+    }
+  }
+
+  async generateImageBytesWithHuggingFace(prompt) {
+    if (!config.huggingFaceApiKey) {
+      throw new Error("HUGGING_FACE_API_KEY is required when IMAGE_PROVIDER=huggingface.");
+    }
+
+    if (typeof fetch !== "function") {
+      throw new Error("Global fetch is not available in this Node runtime.");
+    }
+
+    const endpoint = `https://router.huggingface.co/hf-inference/models/${config.huggingFaceImageModel}`;
+
+    const response = await fetch(endpoint, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${config.huggingFaceApiKey}`,
+        "Content-Type": "application/json",
       },
+      body: JSON.stringify({
+        inputs: prompt,
+      }),
     });
 
-    if (!response.candidates || response.candidates.length === 0) {
-      throw new Error("No image candidates returned.");
-    }
-
-    for (const part of response.candidates[0].content.parts) {
-      if (part.inlineData && part.inlineData.data) {
-        // Data may already be a Buffer or a base64 string
-        if (Buffer.isBuffer(part.inlineData.data)) {
-          return part.inlineData.data;
-        }
-        return Buffer.from(part.inlineData.data, "base64");
+    if (!response.ok) {
+      const errorText = await GeminiService.readErrorResponse(response);
+      if (GeminiService.isQuotaExceededError({ status: response.status, message: errorText })) {
+        throw new QuotaExceededError(
+          "Hugging Face image quota exceeded. Retry later or use another token.",
+          GeminiService.getRetryAfterSeconds({ message: errorText })
+        );
       }
+      throw new Error(
+        `Hugging Face image generation failed (${response.status} ${response.statusText}): ${errorText}`
+      );
     }
 
-    throw new Error("Image bytes were not found in Gemini response.");
+    const bytes = await response.arrayBuffer();
+    return Buffer.from(bytes);
+  }
+
+  static async readErrorResponse(response) {
+    const contentType = response.headers.get("content-type") || "";
+
+    try {
+      if (contentType.includes("application/json")) {
+        const payload = await response.json();
+        if (typeof payload?.error === "string") {
+          return payload.error;
+        }
+        return JSON.stringify(payload);
+      }
+
+      return await response.text();
+    } catch (_err) {
+      return response.statusText || "Unknown error";
+    }
+  }
+
+  static isQuotaExceededError(err) {
+    const message = String(err?.message || "");
+    return err?.status === 429 || message.includes("429") || message.includes("RESOURCE_EXHAUSTED");
+  }
+
+  static getRetryAfterSeconds(err) {
+    const message = String(err?.message || "");
+    const match = message.match(/retry in\s+([\d.]+)s/i);
+    if (!match) {
+      return null;
+    }
+    const parsed = Number(match[1]);
+    return Number.isFinite(parsed) ? Math.ceil(parsed) : null;
+  }
+
+  static buildMockCampaignJson(userInput) {
+    const name = userInput.product_name;
+    const audience = userInput.target_audience;
+    const style = userInput.brand_style || "confident and modern";
+    const platforms = userInput.platforms || [];
+
+    return {
+      concept: `From brief to buzz for ${name}`,
+      brand_tone: style,
+      slogan: `${name}: Built for ${audience}`,
+      messaging_pillars: [
+        "Clear customer problem and strong product value",
+        "Social proof and lifestyle relevance",
+        "Feature-to-benefit storytelling",
+        "Consistent CTA across channels",
+      ],
+      landing_page_headline: `Meet ${name}, the smarter way for ${audience}.`,
+      product_description: userInput.product_description,
+      email_copy: `Introducing ${name}. Designed for ${audience}, it helps you achieve ${userInput.campaign_goal}. Start your launch with a message that is simple, credible, and action-driven.`,
+      ad_headlines: [
+        `Why ${audience} are switching to ${name}`,
+        `${name}: The smarter launch choice`,
+        `Built for ${audience}, ready today`,
+        `Turn interest into action with ${name}`,
+        `${name} is here. Launch stronger.`,
+      ],
+      video_storyboard: [
+        { title: "Scene 1", body: `Open on the pain point ${audience} face today.` },
+        { title: "Scene 2", body: `Introduce ${name} as the clear, modern solution.` },
+        { title: "Scene 3", body: "Show key benefits in fast visual cuts." },
+        { title: "Scene 4", body: "Add a short testimonial-style confidence moment." },
+        { title: "Scene 5", body: `Close with CTA tailored to ${userInput.campaign_goal}.` },
+      ],
+      narration_script: `${name} helps ${audience} move faster from problem to progress. With a ${style} tone and clear benefits, this campaign drives awareness and action across every touchpoint.`,
+      social_captions: {
+        Instagram: `${name} is built for ${audience}. Save this for launch week.`,
+        TikTok: `POV: You found ${name} before everyone else.`,
+        LinkedIn: `Launching ${name} for ${audience} with a focused multi-channel strategy.`,
+      },
+      hashtags: ["#Launch", "#Marketing", "#AI", "#Brand", "#Growth", "#Campaign", "#ProductLaunch"],
+      content_calendar_ideas: [
+        "Founder story post",
+        "Problem/solution explainer carousel",
+        "Feature spotlight short video",
+        "Customer objection FAQ",
+        "Behind-the-scenes build story",
+        "Comparison post",
+        "Launch day CTA post",
+      ],
+      performance_prediction:
+        "Expected outcome: stronger awareness in week one, improving CTR as creative variants are tested. With consistent posting cadence and CTA clarity, conversion intent should improve over the first 2-3 weeks.",
+    };
   }
 
   /**
@@ -152,4 +316,4 @@ SCHEMA
   }
 }
 
-module.exports = GeminiService;
+module.exports = { GeminiService, QuotaExceededError };

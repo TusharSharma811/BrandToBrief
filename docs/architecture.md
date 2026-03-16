@@ -1,6 +1,6 @@
 # Architecture Diagram Description
 
-The AI Marketing Campaign Maker uses a layered architecture designed for production deployment on Google Cloud.
+BriefToBrand uses a layered architecture designed for production deployment on Google Cloud.
 
 ## Components
 

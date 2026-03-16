@@ -1,7 +1,7 @@
 {
   "name": "marketing-campaign-backend",
   "version": "1.0.0",
-  "description": "AI Marketing Campaign Maker API — Node.js backend",
+  "description": "BriefToBrand API — Node.js backend",
   "main": "src/index.js",
   "scripts": {
     "start": "node src/index.js",

@@ -1,6 +1,7 @@
 const { Router } = require("express");
 const { CampaignRequestSchema } = require("../schemas");
 const { CampaignGenerator, NotFoundError } = require("../services/campaignGenerator");
+const { QuotaExceededError } = require("../services/geminiService");
 
 const router = Router();
 
@@ -31,6 +32,13 @@ router.post("/generate", async (req, res) => {
     const result = await getGenerator().generate(parseResult.data);
     return res.json(result);
   } catch (err) {
+    if (err instanceof QuotaExceededError) {
+      return res.status(429).json({
+        detail: err.message,
+        retry_after_seconds: err.retryAfterSeconds,
+      });
+    }
+
     console.error("Campaign generation error:", err);
     return res.status(503).json({
       detail: `Campaign service unavailable: ${err.message}`,
