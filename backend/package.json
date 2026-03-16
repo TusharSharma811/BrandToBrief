@@ -1,0 +1,20 @@
+{
+  "name": "marketing-campaign-backend",
+  "version": "1.0.0",
+  "description": "AI Marketing Campaign Maker API — Node.js backend",
+  "main": "src/index.js",
+  "scripts": {
+    "start": "node src/index.js",
+    "dev": "node --watch src/index.js"
+  },
+  "dependencies": {
+    "@google-cloud/firestore": "^7.11.0",
+    "@google-cloud/storage": "^7.15.0",
+    "@google/genai": "^0.7.0",
+    "cors": "^2.8.5",
+    "dotenv": "^16.4.7",
+    "express": "^4.21.1",
+    "uuid": "^11.0.5",
+    "zod": "^3.24.2"
+  }
+}

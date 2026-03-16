@@ -1,0 +1,7 @@
+flowchart LR
+    A[User in Next.js Frontend] --> B[FastAPI Backend on Cloud Run]
+    B --> C[Gemini via Vertex AI\nText + Image Generation]
+    B --> D[Cloud Storage\nGenerated Media Files]
+    B --> E[Firestore\nCampaign JSON + Metadata]
+    B --> F[Interleaved Response Builder]
+    F --> A
